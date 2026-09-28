@@ -1,0 +1,508 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>NIFTY Options Engine</title>
+<link rel="preconnect" href="https://fonts.googleapis.com">
+<link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+<link href="https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600;700;800&display=swap" rel="stylesheet">
+<link rel="stylesheet" href="{{ url_for('static', filename='style.css') }}">
+</head>
+<body>
+
+<div id="toastContainer" class="toast-container"></div>
+
+<header class="topbar">
+  <div class="topbar-left">
+    <span class="logo-dot"></span>
+    <span class="app-title">NIFTY Options Engine</span>
+    <span id="serverStartedBadge" class="server-started-badge" title="When this python app.py process started - refresh alone does not restart it">
+      Server started {{ restart.server_started_at if restart is defined and restart else '?' }}
+    </span>
+  </div>
+  <div class="topbar-right">
+    <button id="modeBadge" class="badge mode-toggle {{ 'badge-dry' if settings.dry_run else 'badge-live' }}"
+            title="Click to switch between DRY RUN (simulated) and LIVE (real orders)">
+      {{ 'DRY RUN' if settings.dry_run else 'LIVE' }}
+    </button>
+    <button id="settingsToggleBtn" class="icon-btn" title="Settings">⚙ Settings</button>
+  </div>
+</header>
+
+<div id="restartNeededBanner" class="restart-banner" style="display:{{ 'block' if (restart is defined and restart and restart.restart_needed) else 'none' }};">
+  ⚠ The code on disk changed after this server started (code updated {{ restart.code_last_modified if restart is defined and restart else '?' }}, server
+  started {{ restart.server_started_at if restart is defined and restart else '?' }}). <strong>Close this terminal window completely and run <code>python
+  app.py</code> again</strong> - refreshing this page alone does not reload the backend.
+</div>
+
+<main class="container">
+
+  <!-- ===================== SETTINGS ===================== -->
+  <section id="settingsPanel" class="card settings-card {{ '' if not configured else 'collapsed' }}">
+    <div class="card-header">
+      <h2>Settings</h2>
+      <span class="muted">Saved only to settings.json on this machine.</span>
+    </div>
+
+    <form id="settingsForm" class="settings-grid">
+
+      <!-- Execution provider must be first so Kite/OpenAlgo fields show/hide correctly -->
+      <div class="field" style="grid-column: 1 / -1;">
+        <label for="execution_provider">Execution Provider</label>
+        <select id="execution_provider">
+          <option value="kite"      {{ 'selected' if settings.get('execution_provider','kite') == 'kite' }}>Zerodha Kite</option>
+          <option value="openalgo" {{ 'selected' if settings.get('execution_provider','kite') == 'openalgo' }}>OpenAlgo</option>
+        </select>
+        <span class="muted small">Choose your broker connection layer. Kite = direct Zerodha API. OpenAlgo = self-hosted broker-agnostic server (pip install openalgo).</span>
+      </div>
+
+      <!-- ===== Kite fields (hidden when OpenAlgo selected) ===== -->
+      <div id="kiteFields" class="settings-grid" style="grid-column: 1 / -1; display: contents;">
+        <div class="field">
+          <label for="kite_api_key">Kite API Key</label>
+          <input type="text" id="kite_api_key" autocomplete="off" value="{{ settings.kite_api_key }}">
+        </div>
+        <div class="field">
+          <label for="kite_api_secret">Kite API Secret</label>
+          <input type="text" id="kite_api_secret" autocomplete="off" value="{{ settings.kite_api_secret }}">
+        </div>
+      </div>
+
+      <!-- ===== OpenAlgo fields (hidden when Kite selected) ===== -->
+      <div id="openalgoFields" class="settings-grid" style="grid-column: 1 / -1; display: contents;">
+        <div class="field">
+          <label for="openalgo_api_key">OpenAlgo API Key</label>
+          <input type="text" id="openalgo_api_key" autocomplete="off" value="{{ settings.get('openalgo_api_key', '') }}">
+          <span class="muted small">Get this from your running OpenAlgo server — Settings → API Key.</span>
+        </div>
+        <div class="field">
+          <label for="openalgo_host">OpenAlgo Host URL</label>
+          <input type="text" id="openalgo_host" autocomplete="off" value="{{ settings.get('openalgo_host', 'http://127.0.0.1:5000') }}">
+          <span class="muted small">Default: http://127.0.0.1:5000 (local). Change if your OpenAlgo server runs on a different port or host.</span>
+        </div>
+      </div>
+
+      <div class="field">
+        <label for="index">Index (view-only - edit settings.json directly to change)</label>
+        <input type="text" id="index" autocomplete="off" value="{{ settings.index }}" readonly>
+      </div>
+      <div class="field">
+        <label for="lots">Lots</label>
+        <input type="number" id="lots" min="1" step="1" value="{{ settings.lots }}">
+      </div>
+
+      <div class="field">
+        <label for="ai_provider">AI Provider</label>
+        <select id="ai_provider">
+          <option value="gemini" {{ 'selected' if settings.ai_provider == 'gemini' }}>Gemini</option>
+          <option value="claude" {{ 'selected' if settings.ai_provider == 'claude' }}>Claude</option>
+        </select>
+      </div>
+      <div class="field" id="geminiKeyField">
+        <label for="gemini_api_key">Gemini API Key</label>
+        <input type="text" id="gemini_api_key" autocomplete="off" value="{{ settings.gemini_api_key }}">
+      </div>
+      <div class="field" id="claudeKeyField">
+        <label for="anthropic_api_key">Claude (Anthropic) API Key</label>
+        <input type="password" id="anthropic_api_key" autocomplete="off" value="{{ settings.anthropic_api_key }}">
+      </div>
+
+      <div class="field toggle-field">
+        <div class="toggle-row">
+          <label class="switch">
+            <input type="checkbox" id="sl_enabled" {{ 'checked' if settings.sl_enabled }}>
+            <span class="slider"></span>
+          </label>
+          <span>Stop Loss</span>
+        </div>
+        <input type="number" id="max_loss" placeholder="Max loss (₹)" value="{{ settings.max_loss }}">
+      </div>
+
+      <div class="field toggle-field">
+        <div class="toggle-row">
+          <label class="switch">
+            <input type="checkbox" id="target_enabled" {{ 'checked' if settings.target_enabled }}>
+            <span class="slider"></span>
+          </label>
+          <span>Target</span>
+        </div>
+        <input type="number" id="target_profit" placeholder="Target profit (₹)" value="{{ settings.target_profit }}">
+      </div>
+
+      <div class="field toggle-field">
+        <div class="toggle-row">
+          <label class="switch">
+            <input type="checkbox" id="time_exit_enabled" {{ 'checked' if settings.time_exit_enabled }}>
+            <span class="slider"></span>
+          </label>
+          <span>Time Exit</span>
+        </div>
+        <input type="time" id="time_exit" value="{{ settings.time_exit }}">
+      </div>
+
+      <div class="field">
+        <div class="field-label-row">Current Time (India / IST)</div>
+        <div id="liveClock" class="live-clock">--:--:-- --</div>
+      </div>
+
+      <details class="advanced">
+        <summary>Advanced: Proxy (optional - only if your network requires one)</summary>
+        <div class="settings-grid" style="margin-top:12px;">
+          <div class="field toggle-field">
+            <div class="toggle-row">
+              <label class="switch">
+                <input type="checkbox" id="proxy_enabled" {{ 'checked' if settings.proxy.enabled }}>
+                <span class="slider"></span>
+              </label>
+              <span>Use Proxy</span>
+            </div>
+          </div>
+          <div class="field">
+            <label for="proxy_host">Proxy Host</label>
+            <input type="text" id="proxy_host" value="{{ settings.proxy.host }}">
+          </div>
+          <div class="field">
+            <label for="proxy_port">Proxy Port</label>
+            <input type="text" id="proxy_port" value="{{ settings.proxy.port }}">
+          </div>
+          <div class="field">
+            <label for="proxy_user">Proxy User</label>
+            <input type="text" id="proxy_user" value="{{ settings.proxy.user }}">
+          </div>
+          <div class="field">
+            <label for="proxy_pass">Proxy Password</label>
+            <input type="text" id="proxy_pass" value="{{ settings.proxy.pass }}">
+          </div>
+        </div>
+      </details>
+
+      <details class="advanced">
+        <summary>Advanced: AI &amp; Strategy</summary>
+        <div class="settings-grid" style="margin-top:12px;">
+          <div class="field">
+            <label for="profit_margin_factor">Profit margin (x live premium breakeven)</label>
+            <input type="number" id="profit_margin_factor" min="1" step="0.05"
+                   value="{{ settings.profit_margin_factor }}">
+            <span class="muted small">CALL/PUT/BOTH are only entered if the VIX-implied expected move
+              clears the relevant side's REAL, live ATM premium (its own breakeven) times this margin -
+              e.g. 1.15 means the move must beat breakeven by 15%. This is never a fixed points number:
+              it's derived fresh from today's actual option price every time, since the same points move
+              means something different on a day the option is cheap vs expensive.</span>
+          </div>
+          <div class="field">
+            <label for="momentum_min_fraction">Momentum band - min (x expected move)</label>
+            <input type="number" id="momentum_min_fraction" min="0" max="1" step="0.05"
+                   value="{{ settings.momentum_min_fraction }}">
+            <span class="muted small">Today's already-realized move (vs today's Open) only counts as
+              directional evidence once it's used up at least this fraction of the VIX-implied expected
+              move - below this, it's treated as normal noise, not a signal.</span>
+          </div>
+          <div class="field">
+            <label for="momentum_max_fraction">Momentum band - max (x expected move)</label>
+            <input type="number" id="momentum_max_fraction" min="0" max="1" step="0.05"
+                   value="{{ settings.momentum_max_fraction }}">
+            <span class="muted small">...and stops counting past this fraction - a move that's already
+              used up most of today's expected range is more likely near-exhausted than about to extend,
+              so it's deliberately excluded rather than counted as extra-strong evidence (avoids chasing).</span>
+          </div>
+          <div class="field">
+            <label for="oi_change_clamp">OI build-up/unwind clamp (max ±%)</label>
+            <input type="number" id="oi_change_clamp" min="0" max="1" step="0.05"
+                   value="{{ settings.oi_change_clamp }}">
+            <span class="muted small">Resistance/Support walls are also weighted by whether their OI is
+              fresh build-up or unwinding since yesterday's close (not just today's raw size). This caps
+              how much a single day's OI swing can strengthen/weaken a wall - default 0.5 means at most
+              ±50%, so one unusual day can't dominate the whole read.</span>
+          </div>
+          <div class="field" style="grid-column: 1 / -1;">
+            <label class="muted small" style="font-weight:700;">Volatility Confidence formula weights (separate 0-100% gauge, not part of Up/Down%)</label>
+          </div>
+          <div class="field">
+            <label for="volatility_confidence_ratio_scale">Ratio scale</label>
+            <input type="number" id="volatility_confidence_ratio_scale" min="0" step="5"
+                   value="{{ settings.volatility_confidence_ratio_scale }}">
+            <span class="muted small">Confidence = (expected move ÷ recent avg range) × this. E.g. 50 means
+              a "typical" day (ratio 1.0) scores 50%, and double-the-typical-range day scores 100%.</span>
+          </div>
+          <div class="field">
+            <label for="volatility_confidence_orb_bonus">ORB-breakout bonus</label>
+            <input type="number" id="volatility_confidence_orb_bonus" min="0" step="1"
+                   value="{{ settings.volatility_confidence_orb_bonus }}">
+            <span class="muted small">Flat points added if today's price has already broken out past
+              today's own opening-range high/low - a real, confirmed move, not just an implied one.</span>
+          </div>
+          <div class="field">
+            <label for="volatility_confidence_momentum_scale">Momentum bonus (max)</label>
+            <input type="number" id="volatility_confidence_momentum_scale" min="0" step="1"
+                   value="{{ settings.volatility_confidence_momentum_scale }}">
+            <span class="muted small">Max points added based on how much of today's expected move is
+              already realized (scales from 0 up to this value as more of the range gets used).</span>
+          </div>
+          <div class="field">
+            <label for="volatility_confidence_oi_buildup_scale">OI build-up/unwind bonus (max)</label>
+            <input type="number" id="volatility_confidence_oi_buildup_scale" min="0" step="1"
+                   value="{{ settings.volatility_confidence_oi_buildup_scale }}">
+            <span class="muted small">Max points added when the two nearest OI walls show heavy fresh
+              build-up or unwinding since yesterday (either direction - real option-chain positioning,
+              not just VIX). Scales up to this value at the OI build-up/unwind clamp above.</span>
+          </div>
+          <div class="field">
+            <label for="volatility_confidence_cpr_narrow_scale">CPR-narrowness bonus (max)</label>
+            <input type="number" id="volatility_confidence_cpr_narrow_scale" min="0" step="1"
+                   value="{{ settings.volatility_confidence_cpr_narrow_scale }}">
+            <span class="muted small">Max points added when yesterday's Central Pivot Range is narrow
+              (close sat near the middle of its own day's range) - historically precedes a bigger move.
+              Scales down to 0 as the CPR widens.</span>
+          </div>
+          <div class="field" style="grid-column: 1 / -1;">
+            <label for="promptPreview">Current AI prompt (read-only, sections 1–5 always sent; the live
+              VIX/option-chain numbers are added as an extra section at Execute time)</label>
+            <textarea id="promptPreview" class="prompt-preview" rows="8" readonly></textarea>
+          </div>
+          <div class="field" style="grid-column: 1 / -1;">
+            <label for="custom_ai_note">Your additional note to the AI (optional - appended as one more
+              factor, never replaces the above)</label>
+            <textarea id="custom_ai_note" rows="3" placeholder="e.g. Watch for the RBI policy statement at 11am today">{{ settings.custom_ai_note }}</textarea>
+          </div>
+        </div>
+      </details>
+
+      <div class="field" style="grid-column: 1 / -1;">
+        <div class="mode-note">
+          Mode is set by <code>dry_run</code> in <code>settings.json</code> and is intentionally not editable
+          from this page — see README for how to go live.
+        </div>
+        <button type="submit" id="saveSettingsBtn" class="btn btn-primary">Save Settings</button>
+      </div>
+
+    </form>
+  </section>
+
+  <!-- ===================== CONTROL ===================== -->
+  <section class="card control-card">
+    <div class="card-header">
+      <h2>Control</h2>
+      <span id="engineStatusText" class="muted">Idle</span>
+    </div>
+    <div class="control-row">
+      <button id="loginBtn" class="btn btn-secondary" style="display:{{ 'none' if settings.get('execution_provider','kite') == 'openalgo' else 'inline-flex' }};">
+        <span class="status-dot" id="loginDot"></span> Login (Kite)
+      </button>
+      <button id="openalgoLoginBtn" class="btn btn-secondary" style="display:{{ 'inline-flex' if settings.get('execution_provider','kite') == 'openalgo' else 'none' }};">
+        <span class="status-dot" id="loginDot2"></span> Connect OpenAlgo
+      </button>
+      <button id="executeBtn" class="btn btn-primary" disabled>▶ Execute</button>
+      <button id="analyzeBtn" class="btn btn-secondary" disabled title="Runs the exact same analysis as Execute, but never places an order">Analyze Only</button>
+      <button id="stopBtn" class="btn btn-danger" disabled>■ Stop</button>
+    </div>
+    <div id="controlHint" class="muted small"></div>
+    <div id="engineProgressText" class="progress-text" style="display:none;"></div>
+
+    <div class="manual-login-row" id="kiteManualLoginRow" style="display:{{ 'none' if settings.get('execution_provider','kite') == 'openalgo' else 'block' }};">
+      <span class="muted small">Redirect page not reachable after login? Paste that page's URL (or just the
+        request_token) here instead:</span>
+      <div class="manual-login-inputs">
+        <input type="text" id="manualTokenInput" placeholder="http://127.0.0.1/?...request_token=... or just the token">
+        <button id="manualLoginBtn" class="btn btn-secondary">Submit Token</button>
+      </div>
+    </div>
+
+    <details id="manualEntryDetails" class="advanced">
+      <summary>Manual Entry (no analysis - buy CALL/PUT/BOTH directly)</summary>
+      <div class="manual-trade-row">
+        <span class="muted small">Your choice, entered directly; the same SL/Target/time-exit safety
+          net still applies once entered. Prices below are live from Zerodha, refresh every 5s.</span>
+
+        <div class="manual-trade-buttons">
+          <div class="manual-trade-item">
+            <button id="manualCallBtn" class="btn btn-secondary" disabled data-direction="CALL">Buy CALL</button>
+            <div id="previewCallPrice" class="manual-trade-price">—</div>
+          </div>
+          <div class="manual-trade-item">
+            <button id="manualPutBtn" class="btn btn-secondary" disabled data-direction="PUT">Buy PUT</button>
+            <div id="previewPutPrice" class="manual-trade-price">—</div>
+          </div>
+          <div class="manual-trade-item">
+            <button id="manualBothBtn" class="btn btn-secondary" disabled data-direction="BOTH">Buy BOTH (ATM)</button>
+            <div id="previewBothPrice" class="manual-trade-price">—</div>
+          </div>
+        </div>
+        <div id="atmPreviewUnavailable" class="muted small" style="display:none;">Live preview unavailable: <span id="atmPreviewError"></span></div>
+      </div>
+    </details>
+  </section>
+
+  <!-- ===================== LIVE DASHBOARD ===================== -->
+  <div id="engineErrorBanner" class="error-banner" style="display:none;"></div>
+
+  <section class="dashboard-grid">
+
+    <div class="main-col">
+
+      <div class="card chart-card">
+        <div class="card-header">
+          <h2 id="chartTitle">Live Chart</h2>
+          <span id="chartSubtitle" class="muted small"></span>
+        </div>
+        <div id="chart" class="chart-container"></div>
+      </div>
+
+      <div class="card signals-card">
+        <div class="card-header">
+          <h2>Signal Breakdown</h2>
+          <span class="muted small">Hover a chip for detail - the decision below is driven by Probability of Move, not this vote.</span>
+        </div>
+        <div class="signal-chips">
+          <div class="signal-chip">
+            <span class="signal-chip-label">OI Bias</span>
+            <span id="oiBias" class="value direction-badge">—</span>
+          </div>
+          <div class="signal-chip">
+            <span class="signal-chip-label">ATM OI</span>
+            <span id="atmOiBias" class="value direction-badge">—</span>
+          </div>
+          <div class="signal-chip">
+            <span class="signal-chip-label">VWAP Bias</span>
+            <span id="vwapBias" class="value direction-badge">—</span>
+          </div>
+          <div class="signal-chip">
+            <span class="signal-chip-label">ORB</span>
+            <span id="orbBias" class="value direction-badge">—</span>
+          </div>
+          <div class="signal-chip">
+            <span class="signal-chip-label">Technical</span>
+            <span id="technicalBias" class="value direction-badge">—</span>
+          </div>
+          <div class="signal-chip">
+            <span class="signal-chip-label">AI Sentiment</span>
+            <span id="aiSentiment" class="value direction-badge">—</span>
+          </div>
+          <div class="signal-chip">
+            <span class="signal-chip-label">Momentum</span>
+            <span id="momentumBias" class="value direction-badge">—</span>
+          </div>
+          <div class="signal-chip">
+            <span class="signal-chip-label">Large Gap</span>
+            <span id="largeGap" class="value">—</span>
+          </div>
+        </div>
+        <div id="rangeTooTightNote" class="decision-reason muted small"></div>
+        <div class="final-direction-row">
+          <span class="muted">Final Direction <span id="decisionRuleInfo" class="info-icon" title="">ⓘ</span></span>
+          <span id="finalDirection" class="value direction-badge large">—</span>
+        </div>
+      </div>
+
+    </div>
+
+    <div class="side-col">
+
+      <div class="card top-stats-card">
+        <div class="top-stats-row">
+          <div class="top-stat">
+            <div class="label">LTP <span id="feedStatus" class="feed-status" style="display:none;"></span></div>
+            <div id="ltpValue" class="big-number">—</div>
+          </div>
+          <div class="top-stat">
+            <div class="label">P&amp;L</div>
+            <div id="pnlValue" class="big-number neutral">—</div>
+          </div>
+        </div>
+      </div>
+
+      <div class="card probability-card">
+        <div class="label">Probability of Move</div>
+        <div id="probBarEmpty" class="prob-bar-empty">Not analyzed yet - click Execute</div>
+        <div id="probBar" class="prob-bar" style="display:none;">
+          <div id="probUpBar" class="prob-bar-up"></div>
+          <div id="probDownBar" class="prob-bar-down"></div>
+        </div>
+        <div class="prob-bar-legend">
+          <span class="prob-legend-up">▲ Upside</span>
+          <span class="prob-legend-down">Downside ▼</span>
+        </div>
+
+        <div class="range-meter-block">
+          <div class="range-meter-header">
+            <span class="muted small">Today's Expected Range</span>
+            <span id="volConfBadge" class="vol-conf-badge">—</span>
+          </div>
+          <div class="range-meter-track">
+            <div class="range-meter-center-tick" title="Today's open"></div>
+            <div id="rangeMeterFill" class="range-meter-fill" style="display:none;"></div>
+            <div id="rangeMeterSpotDot" class="range-meter-spot" style="display:none;" title="Current spot position within today's expected range"></div>
+          </div>
+          <div class="range-meter-ends">
+            <span id="downsideTarget" class="range-meter-end down">—</span>
+            <span id="upsideTarget" class="range-meter-end up">—</span>
+          </div>
+          <div id="rangeMeterNote" class="muted small range-meter-note">—</div>
+        </div>
+
+        <div class="premium-table">
+          <span class="muted small premium-table-title">ATM Premium</span>
+          <div class="premium-row">
+            <span class="premium-label call">CALL</span>
+            <span id="callPremium" class="premium-value">—</span>
+            <span id="callRequiredMove" class="premium-required">—</span>
+          </div>
+          <div class="premium-row">
+            <span class="premium-label put">PUT</span>
+            <span id="putPremium" class="premium-value">—</span>
+            <span id="putRequiredMove" class="premium-required">—</span>
+          </div>
+          <div class="premium-row net">
+            <span class="premium-label">NET (BOTH)</span>
+            <span id="netPremium" class="premium-value">—</span>
+            <span id="bothRequiredMove" class="premium-required">—</span>
+          </div>
+        </div>
+
+        <div class="wall-chips">
+          <div class="wall-chip support">
+            <span class="wall-chip-label">Support</span>
+            <span id="supportChipLine1" class="wall-chip-line1">—</span>
+            <span id="supportChipLine2" class="wall-chip-line2"></span>
+          </div>
+          <div class="wall-chip resistance">
+            <span class="wall-chip-label">Resistance</span>
+            <span id="resistanceChipLine1" class="wall-chip-line1">—</span>
+            <span id="resistanceChipLine2" class="wall-chip-line2"></span>
+          </div>
+        </div>
+      </div>
+
+      <div class="card positions-card">
+        <div class="label">Open Position(s)</div>
+        <div id="positionsList" class="positions-list muted small">No open position.</div>
+      </div>
+
+    </div>
+  </section>
+
+  <!-- ===================== LOG ===================== -->
+  <section class="card log-card">
+    <details>
+      <summary>Technical log</summary>
+      <div id="logPanel" class="log-panel"></div>
+    </details>
+  </section>
+
+  <footer class="disclaimer-footer">
+    For educational and informational purposes only; not investment advice. Trading in the
+    securities market is subject to market risk - past performance is not indicative of future
+    results. All trading decisions and any resulting profit or loss are solely the user's own
+    responsibility.
+  </footer>
+
+</main>
+
+<script src="{{ url_for('static', filename='socket.io.min.js') }}"></script>
+<script src="{{ url_for('static', filename='lightweight-charts.standalone.production.js') }}"></script>
+<script>
+  window.__CONFIGURED__ = {{ 'true' if configured else 'false' }};
+</script>
+<script src="{{ url_for('static', filename='dashboard.js') }}"></script>
+</body>
+</html>
