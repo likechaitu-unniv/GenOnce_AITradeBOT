@@ -16,7 +16,7 @@
 <header class="topbar">
   <div class="topbar-left">
     <span class="logo-dot"></span>
-    <span class="app-title">NIFTY Options Engine</span>
+    <span class="app-title">NSE Options Engine</span>
     <span id="serverStartedBadge" class="server-started-badge" title="When this python app.py process started - refresh alone does not restart it">
       Server started {{ restart.server_started_at if restart is defined and restart else '?' }}
     </span>
@@ -292,9 +292,26 @@
       <button id="openalgoLoginBtn" class="btn btn-secondary" style="display:{{ 'inline-flex' if settings.get('execution_provider','kite') == 'openalgo' else 'none' }};">
         <span class="status-dot" id="loginDot2"></span> Connect OpenAlgo
       </button>
+      <select id="indexSelect" class="btn btn-index-select" title="Choose the index to trade">
+        <option value="NIFTY"     {{ 'selected' if settings.index == 'NIFTY' }}>NIFTY</option>
+        <option value="BANKNIFTY" {{ 'selected' if settings.index == 'BANKNIFTY' }}>BANKNIFTY</option>
+        <option value="FINNIFTY"  {{ 'selected' if settings.index == 'FINNIFTY' }}>FINNIFTY</option>
+        <option value="MIDCPNIFTY" {{ 'selected' if settings.index == 'MIDCPNIFTY' }}>MIDCPNIFTY</option>
+      </select>
       <button id="executeBtn" class="btn btn-primary" disabled>▶ Execute</button>
       <button id="analyzeBtn" class="btn btn-secondary" disabled title="Runs the exact same analysis as Execute, but never places an order">Analyze Only</button>
+      <button id="loopBtn" class="btn btn-loop" disabled title="Repeat analysis/execute every 60 s until a trade is entered or you click Stop Loop">
+        ↺ Loop
+      </button>
+      <select id="loopModeSelect" class="btn btn-index-select" title="What the loop does on each iteration">
+        <option value="execute">Loop: Execute</option>
+        <option value="analyze">Loop: Analyze</option>
+      </select>
+      <button id="stopLoopBtn" class="btn btn-warning" style="display:none;">✕ Stop Loop</button>
       <button id="stopBtn" class="btn btn-danger" disabled>■ Stop</button>
+    </div>
+    <div id="loopStatusBar" class="loop-status-bar" style="display:none;">
+      <span id="loopStatusText" class="loop-status-text"></span>
     </div>
     <div id="controlHint" class="muted small"></div>
     <div id="engineProgressText" class="progress-text" style="display:none;"></div>

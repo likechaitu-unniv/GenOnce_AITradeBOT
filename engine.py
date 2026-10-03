@@ -52,12 +52,12 @@ INDEX_SPOT_TRADINGSYMBOL = {
     "MIDCPNIFTY": "NIFTY MID SELECT",
 }
 
-# OpenAlgo uses shorter index symbol names (no space/suffix).
+# OpenAlgo uses the short index name as the symbol on NSE_INDEX exchange.
 INDEX_SPOT_TRADINGSYMBOL_OA = {
-    "NIFTY":      "NIFTY",
-    "BANKNIFTY":  "NIFTY BANK",
-    "FINNIFTY":   "NIFTY FIN SERVICE",
-    "MIDCPNIFTY": "NIFTY MID SELECT",
+    "NIFTY":       "NIFTY",
+    "BANKNIFTY":   "BANKNIFTY",
+    "FINNIFTY":    "FINNIFTY",
+    "MIDCPNIFTY":  "MIDCPNIFTY",
 }
 
 INDIA_VIX_TRADINGSYMBOL = "INDIAVIX"  # NSE's volatility index - one for the whole market,
@@ -474,7 +474,10 @@ def get_vwap(kite_client, universe, log):
     today = datetime.date.today()
     market_open_dt = datetime.datetime.combine(today, MARKET_OPEN_TIME)
     now_dt = datetime.datetime.now()
-    candles = kite_client.get_intraday_history(futures_token, market_open_dt, now_dt, interval="minute")
+    # Use futures_tradingsymbol directly (known-good NFO symbol) rather than
+    # futures_token which goes through _token_to_sym_exch and may misroute.
+    candle_token = universe.get("futures_tradingsymbol") or futures_token
+    candles = kite_client.get_intraday_history(candle_token, market_open_dt, now_dt, interval="minute")
     if not candles:
         raise ValueError("no intraday candles available for VWAP calculation")
     formatted = [{"high": c["high"], "low": c["low"], "close": c["close"], "volume": c["volume"]} for c in candles]
@@ -529,12 +532,15 @@ def get_gap_flag(daily_candles, universe, settings, log):
 
 def get_orb_bias(kite_client, universe, current_price, settings, log):
     """
-    Phase 9: Opening Range Breakout (see option_signal.compute_orb_bias) -
-    replaces the old Pivot R1/S1 breakout check. Uses TODAY's own first
-    `orb_minutes` (settings.json, default 15) of 1-minute candles on the
-    INDEX itself - valid Open/High/Low/Close is available for an index even
-    though volume isn't (that's what broke VWAP - see get_vwap - not this),
-    so no futures proxy is needed here.
+    Phase 9: Opening Range Breakout (see option_signal.compute_orb_bias).
+    Uses TODAY's own first `orb_minutes` (settings.json, default 15) of
+    1-minute candles on the INDEX spot symbol.
+
+    For OpenAlgo: many broker plugins don't expose NSE_INDEX intraday
+    minute history, so when the spot token returns empty candles the call
+    automatically retries with the nearest-expiry FUTURES contract
+    (universe["futures_tradingsymbol"]) on NFO — its OHLC tracks the index
+    within ~0.1% intraday, which is plenty for an ORB high/low check.
     """
     orb_minutes = settings.get("orb_minutes", 15)
     today = datetime.date.today()
@@ -547,7 +553,14 @@ def get_orb_bias(kite_client, universe, current_price, settings, log):
             f"(now={now.time()}, range ends {orb_end.time()}), falling back to NEUTRAL")
         return {"orb_bias": "NEUTRAL", "orb_high": None, "orb_low": None, "orb_minutes": orb_minutes}
 
-    candles = kite_client.get_intraday_history(universe["spot_token"], market_open, orb_end, interval="minute")
+    # For OpenAlgo, pass the futures tradingsymbol as a fallback so that
+    # broker plugins which don't expose NSE_INDEX minute history still
+    # produce a real ORB value (futures OHLC is a good proxy).
+    futures_fallback = universe.get("futures_tradingsymbol") if hasattr(kite_client, '_oa') else None
+    candles = kite_client.get_intraday_history(
+        universe["spot_token"], market_open, orb_end, interval="minute",
+        **{"fallback_token": futures_fallback} if futures_fallback else {},
+    )
     if not candles:
         log("[engine] ORB check: no opening-range candles available, falling back to NEUTRAL")
         return {"orb_bias": "NEUTRAL", "orb_high": None, "orb_low": None, "orb_minutes": orb_minutes}
@@ -1502,7 +1515,8 @@ def _run_analysis(kite_client, universe, settings, log, on_event):
     return direction
 
 
-def run(stop_event=None, settings_path="settings.json", log=print, kite_client=None, on_event=None, on_tick=None):
+def run(stop_event=None, settings_path="settings.json", log=print, kite_client=None,
+        on_event=None, on_tick=None, index_override=None):
     """
     kite_client: pass an already-logged-in KiteClient (e.g. from a separate
                  "Login" action in a UI) to reuse it instead of logging in
@@ -1515,6 +1529,8 @@ def run(stop_event=None, settings_path="settings.json", log=print, kite_client=N
                  the KiteTicker - e.g. to stream live prices to a chart.
     """
     settings = load_settings(settings_path)
+    if index_override:
+        settings["index"] = index_override
     stop_event = stop_event or threading.Event()
 
     if kite_client is None:
@@ -1548,7 +1564,8 @@ def run(stop_event=None, settings_path="settings.json", log=print, kite_client=N
         _safety_net_exit(kite_client, positions, log, on_event)
 
 
-def analyze_only(settings_path="settings.json", log=print, kite_client=None, on_event=None, on_tick=None):
+def analyze_only(settings_path="settings.json", log=print, kite_client=None,
+                 on_event=None, on_tick=None, index_override=None):
     """
     Runs the EXACT same one-shot analysis pipeline as run() (_run_analysis -
     same OI/VWAP/ORB/gap/VIX/live-ATM-premium/AI calls, same
@@ -1562,6 +1579,8 @@ def analyze_only(settings_path="settings.json", log=print, kite_client=None, on_
     same inputs at the same moment - never a cheaper/different "preview".
     """
     settings = load_settings(settings_path)
+    if index_override:
+        settings["index"] = index_override
 
     if kite_client is None:
         kite_client = make_client(settings, log=log)
@@ -1584,7 +1603,7 @@ VALID_MANUAL_DIRECTIONS = ("CALL", "PUT", "BOTH")
 
 
 def manual_run(direction, stop_event=None, settings_path="settings.json", log=print,
-                kite_client=None, on_event=None, on_tick=None):
+               kite_client=None, on_event=None, on_tick=None, index_override=None):
     """
     Manual override entry point: the user picks CALL/PUT/BOTH directly from
     the dashboard, skipping the entire one-shot analysis (OI/VWAP/ORB/VIX/
@@ -1597,6 +1616,8 @@ def manual_run(direction, stop_event=None, settings_path="settings.json", log=pr
         raise ValueError(f"invalid direction: {direction!r} - must be one of {VALID_MANUAL_DIRECTIONS}")
 
     settings = load_settings(settings_path)
+    if index_override:
+        settings["index"] = index_override
     stop_event = stop_event or threading.Event()
 
     if kite_client is None:

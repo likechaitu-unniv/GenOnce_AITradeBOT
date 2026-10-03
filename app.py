@@ -32,7 +32,7 @@ from openalgo_client import OpenAlgoClient
 BASE_DIR = os.path.dirname(os.path.abspath(__file__))
 SETTINGS_PATH = os.path.join(BASE_DIR, "settings.json")
 LAST_ANALYSIS_PATH = os.path.join(BASE_DIR, "last_analysis_state.json")
-PORT = 5050  # deliberately different from the fixed Kite redirect port 5000
+PORT = 5051  # deliberately different from the fixed Kite redirect port 5000
 
 # Editing a .py file never hot-reloads a running Python process - only a
 # full restart of `python app.py` picks up new code (unlike templates/
@@ -44,8 +44,15 @@ PORT = 5050  # deliberately different from the fixed Kite redirect port 5000
 # any of them changed after this process started, we know for certain a
 # restart is needed and can say so plainly instead of guessing.
 SERVER_STARTED_AT = datetime.datetime.now()
+_VALID_INDICES = {"NIFTY", "BANKNIFTY", "FINNIFTY", "MIDCPNIFTY"}
 _WATCHED_PY_FILES = ["app.py", "engine.py", "kite_client.py", "openalgo_client.py",
                      "option_signal.py", "ai_sentiment.py", "decision.py"]
+
+
+def _parse_index_override(incoming):
+    """Extract and validate an index override from a request payload dict."""
+    raw = (incoming.get("index") or "").strip().upper()
+    return raw if raw in _VALID_INDICES else None
 
 
 def _code_last_modified():
@@ -77,6 +84,10 @@ STATE = {
     "logged_in": False,
     "running": False,
     "stop_event": None,
+    # Auto-loop: repeatedly runs analyze_only (or run) every LOOP_INTERVAL_SEC
+    # until a trade is entered or the user clicks Stop Loop.
+    "loop_running": False,
+    "loop_stop_event": None,
     # Last "universe_ready"/"decision" engine_event seen, so a page refresh
     # (including while a position is still open and the engine mid-run) can
     # redisplay the same analysis instead of resetting to blank - these are
@@ -653,6 +664,9 @@ def _spawn_engine_thread(runnable, log):
 
 @app.route("/api/execute", methods=["POST"])
 def execute():
+    incoming = request.get_json(force=True, silent=True) or {}
+    index_override = _parse_index_override(incoming)
+
     with STATE_LOCK:
         if not STATE["logged_in"] or STATE["kite_client"] is None:
             return jsonify({"ok": False, "error": "please Login first"}), 400
@@ -670,6 +684,7 @@ def execute():
         lambda: engine.run(
             stop_event=stop_event, settings_path=SETTINGS_PATH, log=log,
             kite_client=kite_client, on_event=on_event, on_tick=on_tick,
+            index_override=index_override,
         ),
         log,
     )
@@ -687,6 +702,7 @@ def manual_trade():
     """
     incoming = request.get_json(force=True, silent=True) or {}
     direction = str(incoming.get("direction", "")).upper()
+    index_override = _parse_index_override(incoming)
     if direction not in engine.VALID_MANUAL_DIRECTIONS:
         return jsonify({"ok": False, "error": "direction must be CALL, PUT, or BOTH"}), 400
 
@@ -707,6 +723,7 @@ def manual_trade():
         lambda: engine.manual_run(
             direction, stop_event=stop_event, settings_path=SETTINGS_PATH, log=log,
             kite_client=kite_client, on_event=on_event, on_tick=on_tick,
+            index_override=index_override,
         ),
         log,
     )
@@ -721,6 +738,9 @@ def analyze():
     NEVER places an order, in any mode (dry_run or LIVE). For watching what
     the system would decide without committing to a trade.
     """
+    incoming = request.get_json(force=True, silent=True) or {}
+    index_override = _parse_index_override(incoming)
+
     with STATE_LOCK:
         if not STATE["logged_in"] or STATE["kite_client"] is None:
             return jsonify({"ok": False, "error": "please Login first"}), 400
@@ -735,7 +755,8 @@ def analyze():
 
     _spawn_engine_thread(
         lambda: engine.analyze_only(
-            settings_path=SETTINGS_PATH, log=log, kite_client=kite_client, on_event=on_event, on_tick=on_tick,
+            settings_path=SETTINGS_PATH, log=log, kite_client=kite_client,
+            on_event=on_event, on_tick=on_tick, index_override=index_override,
         ),
         log,
     )
@@ -753,11 +774,164 @@ def stop():
     return jsonify({"ok": True, "message": "Stop signal sent - squaring off any open position now."})
 
 
+# ------------------------------------------------------------------ auto-loop
+# Calls engine.run() (execute mode) or engine.analyze_only() (analyze mode)
+# in a background thread on a 60-second cadence.  Stops automatically the
+# moment a trade is entered, or immediately when the user clicks Stop Loop.
+# Each individual analysis/execute call is wrapped in the same
+# _spawn_engine_thread error-handling used by the one-shot routes above.
+
+LOOP_INTERVAL_SEC = 60   # pause between iterations (interruptible via loop_stop_event)
+
+
+def _run_loop(mode, index_override, kite_client, log):
+    """
+    Background loop thread.  mode: "execute" | "analyze".
+    Emits loop_status {"running": True/False, "iteration": N, "mode": mode}
+    via socketio so the dashboard can show a live counter.
+    """
+    iteration = 0
+    loop_stop_event = STATE["loop_stop_event"]
+
+    while not loop_stop_event.is_set():
+        iteration += 1
+        socketio.emit("loop_status", {
+            "running": True, "iteration": iteration, "mode": mode,
+            "message": f"Loop iteration {iteration} — running {mode}…",
+        })
+        log(f"[loop] iteration {iteration} starting ({mode} mode)")
+
+        # Block concurrent Execute/Analyze one-shot clicks while loop owns the engine.
+        with STATE_LOCK:
+            if STATE["running"]:
+                log("[loop] engine busy (unexpected), skipping this iteration")
+            else:
+                STATE["running"] = True
+                run_stop_event = threading.Event()
+                STATE["stop_event"] = run_stop_event
+
+        on_event, on_tick = _make_event_relays()
+        trade_entered = False
+
+        try:
+            if mode == "execute":
+                result = engine.run(
+                    stop_event=run_stop_event,
+                    settings_path=SETTINGS_PATH,
+                    log=log,
+                    kite_client=kite_client,
+                    on_event=on_event,
+                    on_tick=on_tick,
+                    index_override=index_override,
+                )
+                # run() returns {"direction": ..., "positions": [...]}
+                trade_entered = bool(result.get("positions"))
+            else:
+                result = engine.analyze_only(
+                    settings_path=SETTINGS_PATH,
+                    log=log,
+                    kite_client=kite_client,
+                    on_event=on_event,
+                    on_tick=on_tick,
+                    index_override=index_override,
+                )
+                # analyze_only never places a trade; loop always continues
+                trade_entered = False
+
+        except Exception as exc:  # noqa: BLE001
+            log(f"[loop] iteration {iteration} failed: {exc!r}")
+            socketio.emit("engine_event", {"type": "error", "message": str(exc)})
+        finally:
+            with STATE_LOCK:
+                STATE["running"] = False
+                STATE["stop_event"] = None
+            socketio.emit("engine_status", {"running": False})
+
+        if trade_entered:
+            log("[loop] trade entered — stopping loop automatically")
+            socketio.emit("loop_status", {
+                "running": False, "iteration": iteration, "mode": mode,
+                "message": f"Loop stopped after {iteration} iteration(s) — trade entered.",
+            })
+            break
+
+        if loop_stop_event.is_set():
+            break
+
+        # Wait LOOP_INTERVAL_SEC, but wake up immediately if stop is requested.
+        log(f"[loop] iteration {iteration} done, waiting {LOOP_INTERVAL_SEC}s before next…")
+        socketio.emit("loop_status", {
+            "running": True, "iteration": iteration, "mode": mode,
+            "message": f"Iteration {iteration} done — next in {LOOP_INTERVAL_SEC}s (click Stop Loop to cancel)",
+        })
+        loop_stop_event.wait(timeout=LOOP_INTERVAL_SEC)
+
+    with STATE_LOCK:
+        STATE["loop_running"] = False
+        STATE["loop_stop_event"] = None
+
+    if not trade_entered:
+        socketio.emit("loop_status", {
+            "running": False, "iteration": iteration, "mode": mode,
+            "message": f"Loop stopped after {iteration} iteration(s).",
+        })
+    log(f"[loop] stopped after {iteration} iteration(s)")
+
+
+@app.route("/api/loop/start", methods=["POST"])
+def loop_start():
+    """Start the auto-loop.  Body: {mode: 'execute'|'analyze', index: 'NIFTY'|...}"""
+    incoming = request.get_json(force=True, silent=True) or {}
+    mode = incoming.get("mode", "execute").lower()
+    if mode not in ("execute", "analyze"):
+        return jsonify({"ok": False, "error": "mode must be 'execute' or 'analyze'"}), 400
+    index_override = _parse_index_override(incoming)
+
+    with STATE_LOCK:
+        if not STATE["logged_in"] or STATE["kite_client"] is None:
+            return jsonify({"ok": False, "error": "please Login first"}), 400
+        if STATE["loop_running"]:
+            return jsonify({"ok": False, "error": "loop is already running"}), 400
+        if STATE["running"]:
+            return jsonify({"ok": False, "error": "engine is already running — stop it first"}), 400
+        loop_stop_event = threading.Event()
+        STATE["loop_running"] = True
+        STATE["loop_stop_event"] = loop_stop_event
+        kite_client = STATE["kite_client"]
+
+    log = _make_log()
+    threading.Thread(
+        target=_run_loop,
+        args=(mode, index_override, kite_client, log),
+        daemon=True,
+    ).start()
+    socketio.emit("loop_status", {"running": True, "iteration": 0, "mode": mode,
+                                   "message": f"Loop started ({mode} mode, every {LOOP_INTERVAL_SEC}s)"})
+    return jsonify({"ok": True, "mode": mode})
+
+
+@app.route("/api/loop/stop", methods=["POST"])
+def loop_stop():
+    """Stop the running loop immediately (after the current iteration finishes)."""
+    with STATE_LOCK:
+        loop_running = STATE["loop_running"]
+        loop_stop_event = STATE["loop_stop_event"]
+    if not loop_running or loop_stop_event is None:
+        return jsonify({"ok": False, "error": "loop is not running"}), 400
+    loop_stop_event.set()
+    return jsonify({"ok": True, "message": "Loop stop signal sent — current iteration will finish then exit."})
+
+
 @app.route("/api/status", methods=["GET"])
 def status():
     with STATE_LOCK:
-        result = {"logged_in": STATE["logged_in"], "running": STATE["running"]}
+        result = {
+            "logged_in": STATE["logged_in"],
+            "running": STATE["running"],
+            "loop_running": STATE["loop_running"],
+        }
     result.update(restart_status())
+    return jsonify(result)
     return jsonify(result)
 
 

@@ -139,7 +139,34 @@ def _fixed_prompt(market_context=None, custom_note=None):
     )
     return prompt
 
-VALID_SENTIMENTS = ("POSITIVE", "NEGATIVE", "NEUTRAL")
+def _normalise_gemini_model(model):
+    """
+    Map legacy / wrong model names to their correct Gemini API identifiers.
+    Gemini API returns HTTP 400 for unrecognised model names, which was
+    causing every AI sentiment call to fail silently with NEUTRAL.
+
+    Canonical list as of mid-2025:
+      gemini-2.0-flash      (fast, grounding-capable, recommended default)
+      gemini-1.5-flash      (stable, grounding-capable)
+      gemini-1.5-pro        (larger)
+      gemini-2.5-pro-preview-06-05
+    """
+    _ALIAS = {
+        # Shut-down / legacy / wrong names → current live model (gemini-3.5-flash)
+        "gemini-flash-latest":     "gemini-3.5-flash",
+        "gemini-flash":            "gemini-3.5-flash",
+        "gemini-1.5-flash":        "gemini-3.5-flash",
+        "gemini-1.5-flash-latest": "gemini-3.5-flash",
+        "gemini-2.0-flash":        "gemini-3.5-flash",  # shut down Oct 2026
+        "gemini-2.0-flash-latest": "gemini-3.5-flash",
+        "gemini-2.0-flash-exp":    "gemini-3.5-flash",
+        "gemini-2.0-flash-lite":   "gemini-3.5-flash",
+        "gemini-2.5-flash":        "gemini-3.5-flash",  # superseded
+        "gemini-2.5-flash-lite":   "gemini-3.5-flash",
+        "gemini-pro":              "gemini-3.5-flash",
+        "gemini-1.0-pro":          "gemini-3.5-flash",
+    }
+    return _ALIAS.get(model, model)  # pass unknown names through unchanged
 _SAFE_DEFAULT = {"sentiment": "NEUTRAL", "reason": "safe default (no successful AI response)"}
 
 _JSON_OBJ_RE = re.compile(r"\{.*?\}", re.DOTALL)
@@ -164,7 +191,11 @@ def _parse_sentiment_json(text):
 
 def _call_gemini(settings, market_context=None, custom_note=None, timeout=45, log=print):
     api_key = settings["gemini_api_key"]
-    model = settings["gemini_model"]
+    raw_model = settings["gemini_model"]
+    model = _normalise_gemini_model(raw_model)
+    if model != raw_model:
+        log(f"[ai_sentiment] gemini_model {raw_model!r} normalised to {model!r} "
+            f"(update settings.json to silence this warning)")
     url = f"https://generativelanguage.googleapis.com/v1beta/models/{model}:generateContent"
     headers = {"x-goog-api-key": api_key, "Content-Type": "application/json"}
     prompt = _fixed_prompt(market_context, custom_note)

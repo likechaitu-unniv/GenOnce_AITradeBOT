@@ -230,6 +230,12 @@
   const executeBtn = $("executeBtn");
   const analyzeBtn = $("analyzeBtn");
   const stopBtn = $("stopBtn");
+  const loopBtn = $("loopBtn");
+  const stopLoopBtn = $("stopLoopBtn");
+  const loopModeSelect = $("loopModeSelect");
+  const loopStatusBar = $("loopStatusBar");
+  const loopStatusText = $("loopStatusText");
+  const indexSelect = $("indexSelect");
   const engineStatusText = $("engineStatusText");
   const controlHint = $("controlHint");
   const manualTokenInput = $("manualTokenInput");
@@ -244,6 +250,7 @@
   let loggedIn = false;
   let running = false;
   let loggingIn = false;
+  let loopRunning = false;
 
   function setHint(text, kind) {
     controlHint.textContent = text || "";
@@ -251,11 +258,18 @@
   }
 
   function refreshControlState() {
-    loginBtn.disabled = running || loggingIn;
-    executeBtn.disabled = !loggedIn || running || !window.__CONFIGURED__;
-    analyzeBtn.disabled = !loggedIn || running || !window.__CONFIGURED__;
-    stopBtn.disabled = !running;
-    modeBadge.disabled = running;
+    loginBtn.disabled = running || loggingIn || loopRunning;
+    executeBtn.disabled = !loggedIn || running || !window.__CONFIGURED__ || loopRunning;
+    analyzeBtn.disabled = !loggedIn || running || !window.__CONFIGURED__ || loopRunning;
+    stopBtn.disabled = !running || loopRunning;
+    modeBadge.disabled = running || loopRunning;
+    if (indexSelect) indexSelect.disabled = running || loopRunning;
+
+    // Loop controls
+    loopBtn.disabled = !loggedIn || running || !window.__CONFIGURED__ || loopRunning;
+    loopModeSelect.disabled = loopRunning;
+    stopLoopBtn.style.display = loopRunning ? "inline-flex" : "none";
+    loopStatusBar.style.display = loopRunning ? "flex" : "none";
     // Manual login is a fallback and stays usable even while the automatic
     // Login button is mid-attempt (e.g. still waiting on a redirect that
     // will never arrive) - only block it while the engine is running.
@@ -349,7 +363,7 @@
       manualTradeBtns.forEach(b => { b.disabled = true; });
       $("engineErrorBanner").style.display = "none";
       try {
-        await postJSON("/api/manual_trade", { direction });
+        await postJSON("/api/manual_trade", { direction, index: indexSelect ? indexSelect.value : null });
         toast(`Manual ${direction} entry started`, "success");
       } catch (err) {
         toast("Could not start manual entry: " + err.message, "error");
@@ -433,7 +447,7 @@
     executeBtn.disabled = true;
     $("engineErrorBanner").style.display = "none";
     try {
-      await postJSON("/api/execute", {});
+      await postJSON("/api/execute", { index: indexSelect ? indexSelect.value : null });
       toast("Execute started", "success");
     } catch (err) {
       toast("Could not start: " + err.message, "error");
@@ -445,7 +459,7 @@
     analyzeBtn.disabled = true;
     $("engineErrorBanner").style.display = "none";
     try {
-      await postJSON("/api/analyze", {});
+      await postJSON("/api/analyze", { index: indexSelect ? indexSelect.value : null });
       toast("Analysis started - no order will be placed", "success");
     } catch (err) {
       toast("Could not start analysis: " + err.message, "error");
@@ -461,6 +475,38 @@
     } catch (err) {
       toast("Stop failed: " + err.message, "error");
       stopBtn.disabled = false;
+    }
+  });
+
+  // ---------------------------------------------------------------- loop controls
+
+  loopBtn.addEventListener("click", async () => {
+    const mode = loopModeSelect ? loopModeSelect.value : "execute";
+    const modeLabel = mode === "analyze" ? "Analyze Only" : "Execute";
+    loopBtn.disabled = true;
+    $("engineErrorBanner").style.display = "none";
+    try {
+      await postJSON("/api/loop/start", {
+        mode,
+        index: indexSelect ? indexSelect.value : null,
+      });
+      loopRunning = true;
+      refreshControlState();
+      toast(`Loop started — ${modeLabel} every 60 s until a trade is entered`, "success");
+    } catch (err) {
+      toast("Could not start loop: " + err.message, "error");
+      loopBtn.disabled = false;
+    }
+  });
+
+  stopLoopBtn.addEventListener("click", async () => {
+    stopLoopBtn.disabled = true;
+    try {
+      await postJSON("/api/loop/stop", {});
+      toast("Loop stop signal sent — current iteration will finish then exit", "success");
+    } catch (err) {
+      toast("Could not stop loop: " + err.message, "error");
+      stopLoopBtn.disabled = false;
     }
   });
 
@@ -731,6 +777,21 @@
       }
     }
     refreshControlState();
+  });
+
+  // Loop status updates from the server-side _run_loop thread.
+  socket.on("loop_status", (data) => {
+    loopRunning = !!data.running;
+    if (loopStatusText && data.message) {
+      loopStatusText.textContent = data.message;
+    }
+    // Re-enable the Stop Loop button if it was temporarily disabled
+    if (stopLoopBtn) stopLoopBtn.disabled = false;
+    refreshControlState();
+    if (!loopRunning) {
+      // Loop finished (trade entered or user stopped it)
+      if (data.message) toast(data.message, "success");
+    }
   });
 
   let lastTickReceivedAt = null;
@@ -1077,6 +1138,10 @@
   function applyStatus(data) {
     loggedIn = !!data.logged_in;
     running = !!data.running;
+    loopRunning = !!data.loop_running;
+    if (loopRunning && loopStatusText && !loopStatusText.textContent) {
+      loopStatusText.textContent = "Loop is running — waiting for next iteration…";
+    }
     refreshControlState();
 
     const banner = $("restartNeededBanner");

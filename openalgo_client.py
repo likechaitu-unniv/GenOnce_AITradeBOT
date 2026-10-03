@@ -357,10 +357,18 @@ class OpenAlgoClient:
             self.log(f"[openalgo_client] daily history error for {instrument_token}: {exc!r}")
             return []
 
-    def get_intraday_history(self, instrument_token, from_dt, to_dt, interval="5minute"):
+    def get_intraday_history(self, instrument_token, from_dt, to_dt, interval="5minute",
+                             fallback_token=None):
         """
         Returns sub-day candles. KiteConnect interval names are translated
         to OpenAlgo format ("5minute" -> "5m" etc.).
+
+        fallback_token: optional alternative instrument_token to try when
+        the primary returns empty.  Used by engine.get_orb_bias to fall back
+        from the NSE_INDEX spot symbol (which many broker plugins don't
+        expose via history()) to the nearest-expiry FUTURES contract on NFO,
+        whose OHLC tracks the index within ~0.1% intraday — good enough for
+        an opening-range high/low check.
         """
         sym, exch = _token_to_sym_exch(instrument_token)
         oa_interval = _kite_interval_to_oa(interval)
@@ -373,10 +381,39 @@ class OpenAlgoClient:
                 end_date=_date_str(to_dt),
                 source="api",
             )
-            return _df_to_candles(df)
+            candles = _df_to_candles(df)
+            if candles:
+                return candles
+            # Primary returned empty — try fallback if provided.
+            if fallback_token:
+                self.log(
+                    f"[openalgo_client] intraday history empty for {instrument_token} "
+                    f"({exch}), retrying with fallback {fallback_token}"
+                )
+                return self._intraday_history_raw(fallback_token, oa_interval, from_dt, to_dt)
+            return []
         except Exception as exc:  # noqa: BLE001
             self.log(f"[openalgo_client] intraday history error for {instrument_token}: {exc!r}")
+            if fallback_token:
+                self.log(f"[openalgo_client] retrying with fallback {fallback_token}")
+                try:
+                    return self._intraday_history_raw(fallback_token, oa_interval, from_dt, to_dt)
+                except Exception as exc2:  # noqa: BLE001
+                    self.log(f"[openalgo_client] fallback intraday history also failed: {exc2!r}")
             return []
+
+    def _intraday_history_raw(self, instrument_token, oa_interval, from_dt, to_dt):
+        """Internal: fetch intraday history without any fallback logic."""
+        sym, exch = _token_to_sym_exch(instrument_token)
+        df = self._oa.history(
+            symbol=sym,
+            exchange=exch,
+            interval=oa_interval,
+            start_date=_date_str(from_dt),
+            end_date=_date_str(to_dt),
+            source="api",
+        )
+        return _df_to_candles(df)
 
     # -------------------------------------------------------------- ticker
 

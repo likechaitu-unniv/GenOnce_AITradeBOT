@@ -261,8 +261,59 @@ input:disabled {
 .btn-secondary { background: var(--bg); color: var(--text-primary); border: 1px solid var(--border); }
 .btn-secondary:hover:not(:disabled) { background: #E9E9E9; }
 
+/* Index selector in the control row - styled to match the btn shape */
+.btn-index-select {
+  height: 36px;
+  padding: 0 12px;
+  border-radius: 8px;
+  border: 1px solid var(--border);
+  background: var(--bg);
+  color: var(--text-primary);
+  font-family: inherit;
+  font-size: 0.875rem;
+  font-weight: 600;
+  cursor: pointer;
+  outline: none;
+  appearance: none;
+  -webkit-appearance: none;
+  /* chevron via inline SVG so no extra dependency */
+  background-image: url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' width='12' height='12' viewBox='0 0 12 12'%3E%3Cpath fill='%23667085' d='M2 4l4 4 4-4'/%3E%3C/svg%3E");
+  background-repeat: no-repeat;
+  background-position: right 10px center;
+  padding-right: 28px;
+  min-width: 130px;
+}
+.btn-index-select:hover { background-color: #E9E9E9; }
+.btn-index-select:disabled { opacity: 0.5; cursor: not-allowed; }
+
 .btn-danger { background: var(--red-bg); color: var(--red); }
 .btn-danger:hover:not(:disabled) { background: #FEE4E2; }
+
+/* Loop button — amber/orange tint to distinguish from Execute (blue) and Stop (red) */
+.btn-loop { background: #FFF3CD; color: #92400E; border: 1px solid #FCD34D; }
+.btn-loop:hover:not(:disabled) { background: #FEF3C7; }
+.btn-loop:disabled { opacity: 0.5; cursor: not-allowed; }
+
+/* Warning button — used for Stop Loop */
+.btn-warning { background: #FEF3C7; color: #92400E; border: 1px solid #FCD34D; }
+.btn-warning:hover:not(:disabled) { background: #FDE68A; }
+
+/* Loop status bar — sits below the control row while a loop is active */
+.loop-status-bar {
+  margin-top: 8px;
+  padding: 8px 12px;
+  border-radius: 8px;
+  background: #FFFBEB;
+  border: 1px solid #FCD34D;
+  display: flex;
+  align-items: center;
+  gap: 10px;
+}
+.loop-status-text {
+  font-size: 0.82rem;
+  color: #92400E;
+  font-weight: 500;
+}
 
 /* ---------------- control ---------------- */
 
